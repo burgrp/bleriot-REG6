@@ -15,8 +15,10 @@ const (
 	RegChannel4
 	RegChannel5
 	RegChannel6
+	RegWatchdog uint16 = 7
 
-	WireFullScale int32 = 100
+	WireFullScale      int32 = 100
+	WatchdogMaxSeconds int32 = 60
 )
 
 var ChannelTags = [...]uint16{
@@ -57,6 +59,16 @@ func Type() inventory.DeviceType {
 			channelRegister(RegChannel4, "channel.4"),
 			channelRegister(RegChannel5, "channel.5"),
 			channelRegister(RegChannel6, "channel.6"),
+			{
+				Tag:  RegWatchdog,
+				Name: "watchdog",
+				Type: inventory.TypeInt,
+				Metadata: map[string]string{
+					"min":  "0",
+					"max":  "60",
+					"unit": "seconds",
+				},
+			},
 		},
 	}
 }

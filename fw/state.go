@@ -7,11 +7,85 @@ import (
 )
 
 const (
-	channelCount    = len(spec.ChannelTags)
-	pwmFrequencyHz  = 24_000
-	pwmTimerClockHz = 24_000_000
-	pwmPeriodTicks  = pwmTimerClockHz / pwmFrequencyHz
+	channelCount         = len(spec.ChannelTags)
+	nanosecondsPerSecond = int64(1_000_000_000)
+	pwmFrequencyHz       = 24_000
+	pwmTimerClockHz      = 24_000_000
+	pwmPeriodTicks       = pwmTimerClockHz / pwmFrequencyHz
 )
+
+type controllerState struct {
+	channels channelState
+	watchdog watchdogLease
+}
+
+func (state *controllerState) read(tag uint16, now int64) (value int32, null, forceOff bool) {
+	forceOff = state.expireWatchdog(now)
+	if tag == spec.RegWatchdog {
+		return state.watchdog.remaining(now), false, forceOff
+	}
+	value, null = state.channels.read(tag)
+	return value, null, forceOff
+}
+
+func (state *controllerState) write(tag uint16, value int32, null bool, now int64) (levelsChanged, forceOff bool) {
+	forceOff = state.expireWatchdog(now)
+	if tag == spec.RegWatchdog {
+		if !state.watchdog.set(value, null, now) {
+			state.channels.clear()
+			return false, true
+		}
+		return false, forceOff
+	}
+	if !state.watchdog.active(now) {
+		return false, forceOff
+	}
+	return state.channels.write(tag, value, null), forceOff
+}
+
+func (state *controllerState) expireWatchdog(now int64) bool {
+	if !state.watchdog.expire(now) {
+		return false
+	}
+	state.channels.clear()
+	return true
+}
+
+type watchdogLease struct {
+	deadline int64
+}
+
+func (lease *watchdogLease) set(value int32, null bool, now int64) bool {
+	if null || value <= 0 {
+		lease.deadline = 0
+		return false
+	}
+	if value > spec.WatchdogMaxSeconds {
+		value = spec.WatchdogMaxSeconds
+	}
+	lease.deadline = now + int64(value)*nanosecondsPerSecond
+	return true
+}
+
+func (lease *watchdogLease) active(now int64) bool {
+	return lease.deadline != 0 && lease.deadline > now
+}
+
+func (lease *watchdogLease) remaining(now int64) int32 {
+	if !lease.active(now) {
+		return 0
+	}
+	remaining := lease.deadline - now
+	return int32((remaining + nanosecondsPerSecond - 1) / nanosecondsPerSecond)
+}
+
+func (lease *watchdogLease) expire(now int64) bool {
+	if lease.deadline == 0 || lease.deadline > now {
+		return false
+	}
+	lease.deadline = 0
+	return true
+}
 
 type channelState struct {
 	levels [channelCount]int32
@@ -76,11 +150,17 @@ func levelCompare(level int32) uint32 {
 	return uint32((int64(level)*pwmPeriodTicks + int64(spec.WireFullScale)/2) / int64(spec.WireFullScale))
 }
 
-func statusColors(online, pulse bool, levels [channelCount]int32) [channelCount]color.RGBA {
+func statusColors(online, pulse, watchdogExpired bool, levels [channelCount]int32) [channelCount]color.RGBA {
 	var colors [channelCount]color.RGBA
 	if !online {
 		if pulse {
 			colors[0] = color.RGBA{R: 0xFF, G: 0x30, B: 0x00, A: 0xFF}
+		}
+		return colors
+	}
+	if watchdogExpired {
+		if pulse {
+			colors[1] = color.RGBA{B: 0xFF, A: 0xFF}
 		}
 		return colors
 	}
@@ -94,5 +174,6 @@ func statusColors(online, pulse bool, levels [channelCount]int32) [channelCount]
 func levelColor(level int32) color.RGBA {
 	level = clampLevel(level)
 	red := uint8((int64(level)*255 + int64(spec.WireFullScale)/2) / int64(spec.WireFullScale))
-	return color.RGBA{R: red, B: 255 - red, A: 255}
+	// Normal mode runs at half the status-indicator intensity.
+	return color.RGBA{R: red / 2, G: 50, B: (255 - red) / 2, A: 255}
 }

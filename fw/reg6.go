@@ -32,7 +32,7 @@ const (
 )
 
 type Device struct {
-	channels       channelState
+	state          controllerState
 	pwm            pwmOutputs
 	led            ws2812.Device
 	lastLEDFrame   [channelCount]color.RGBA
@@ -73,27 +73,38 @@ func newDevice() (*Device, error) {
 	pinStatusLED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	device.led = ws2812.NewWS2812(pinStatusLED)
 	device.led.SetBrightness(ledBrightness)
-	if err := device.writeLEDFrame(statusColors(false, false, device.channels.levels)); err != nil {
+	if err := device.writeLEDFrame(statusColors(false, false, true, device.state.channels.levels)); err != nil {
 		return device, err
 	}
 	return device, nil
 }
 
 func (device *Device) Read(tag uint16) (value int32, null bool) {
-	return device.channels.read(tag)
+	value, null, forceOff := device.state.read(tag, nanotime())
+	if forceOff {
+		device.pwm.off()
+	}
+	return value, null
 }
 
 func (device *Device) Write(tag uint16, value int32, null bool) {
-	if device.channels.write(tag, value, null) {
-		device.pwm.apply(device.channels.levels)
+	levelsChanged, forceOff := device.state.write(tag, value, null, nanotime())
+	if forceOff {
+		device.pwm.off()
+	} else if levelsChanged {
+		device.pwm.apply(device.state.channels.levels)
 	}
 }
 
 func (device *Device) syncStatus(online, pulse bool) error {
-	if !online && device.channels.clear() {
+	now := nanotime()
+	if device.state.expireWatchdog(now) {
 		device.pwm.off()
 	}
-	return device.writeLEDFrame(statusColors(online, pulse, device.channels.levels))
+	if !online && device.state.channels.clear() {
+		device.pwm.off()
+	}
+	return device.writeLEDFrame(statusColors(online, pulse, !device.state.watchdog.active(now), device.state.channels.levels))
 }
 
 func (device *Device) writeLEDFrame(frame [channelCount]color.RGBA) error {
@@ -109,7 +120,7 @@ func (device *Device) writeLEDFrame(frame [channelCount]color.RGBA) error {
 }
 
 func (device *Device) runOffline() {
-	device.channels.clear()
+	device.state.channels.clear()
 	device.pwm.off()
 	for {
 		if err := device.syncStatus(false, true); err != nil {
@@ -136,7 +147,7 @@ func sameLEDFrame(left, right [channelCount]color.RGBA) bool {
 
 func halt(device *Device, message string) {
 	if device != nil {
-		device.channels.clear()
+		device.state.channels.clear()
 		device.pwm.off()
 	}
 	pinStatusLED.Low()

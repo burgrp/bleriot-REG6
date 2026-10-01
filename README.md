@@ -51,25 +51,38 @@ registers:
 | `ssr.channel.4` | 4 | int | 0..100 |
 | `ssr.channel.5` | 5 | int | 0..100 |
 | `ssr.channel.6` | 6 | int | 0..100 |
+| `ssr.watchdog` | 7 | int | 0..60 seconds |
 
 Values are direct integer percentages on the Registry and `int32` wire protocol.
 Firmware clamps assignments to 0..100, and a Registry NULL assignment clears
-that channel to zero.
+that channel to zero. `ssr.watchdog` is a lease counter. Positive writes arm it
+for up to 60 seconds, with larger values clamped to 60; zero, negative, and NULL
+writes expire it. Reads return the remaining whole seconds rounded up, or zero
+at and after the monotonic deadline.
 Register tags are permanent wire identities and must not be renumbered or
 reused.
 
 ## Status And Safety
 
-While BleRiot is online, each LED represents its matching channel: zero is
-blue, 100 is red, and intermediate values are a linear blue-to-red blend. The
-WS2812 driver's global brightness is 128/255, approximately 50%.
+While BleRiot is online and the watchdog is armed, each LED represents its
+matching channel level. Status indicators use the WS2812 driver's global
+brightness of 128/255 (approximately 50%); normal channel colors render at half
+that, approximately 25%.
+
+The watchdog starts expired. While it is expired, channel SET requests are
+acknowledged but ignored. Expiry clears all six retained channel levels and
+forces both PWM timers to 0% duty. Writing a positive watchdog value re-arms
+channel writes but does not restore cleared levels; every active channel needs
+a fresh SET. While the radio remains online and the watchdog is expired, only
+D2 blinks pure blue using the BleRiot heartbeat phase.
 
 The node starts offline. If no valid packet has arrived, or packets stop for
 more than five seconds, firmware clears all six retained levels and forces both
-timers to update with 0% duty immediately. D1 then pulses yellow for 200 ms
+timers to update with 0% duty immediately. D1 then pulses orange-red for 200 ms
 once per second; D2-D6 remain off. A radio initialization failure follows the
 same safe output and heartbeat behavior. Reconnection does not restore old
-levels: each active channel requires a fresh SET.
+levels: each active channel requires a fresh SET. This RF-offline indication
+has priority over the online watchdog-expired indication.
 
 ## Build And Run
 
@@ -102,6 +115,11 @@ Run the hub against a Registry service with:
 go -C fw run ./cmd/dev hub --registry http://localhost:8080 --diagnostics rf
 ```
 
+With the hub and Registry running, `./fw/color-test.sh` continuously renews a
+five-second watchdog lease before writing the six demonstration channel levels.
+Set the `REGISTRY` environment variable to use a URL other than
+`http://localhost:8080`.
+
 `make -C fw new` prints another random inventory stub; it does not update the
 checked-in development identity automatically.
 
@@ -109,19 +127,26 @@ checked-in development identity automatically.
 
 Perform initial validation with low-voltage loads only and no mains connected:
 
-1. Build and flash the firmware, then verify D1 pulses yellow and every PWM pin
+1. Build and flash the firmware, then verify D1 pulses orange-red and every PWM pin
    is low before the hub sends a valid packet.
-2. Start the hub and write 0, 50, and 100 to each Registry channel in turn.
+2. Start the hub, arm `ssr.watchdog`, and write 0, 50, and 100 to each Registry
+   channel in turn.
    Scope PA8, PA9, PA10, PB4, PB5, and PF3; expect a constant low at 0%, a
    24 kHz waveform at 50%, and a constant high at 100% duty.
-3. Confirm D1-D6 track their corresponding values from blue through the linear
-   blend to red, with the chain limited to approximately 50% brightness.
-4. Set all channels nonzero, stop RF traffic for more than five seconds, and
-   verify every PWM output goes low and only D1 pulses yellow for 200 ms per
-   second.
-5. Restore RF traffic without sending SETs and confirm all outputs remain off.
-   Send fresh SETs and verify only those channels resume.
-6. Repeat power-up with the PAN2110 unavailable or misconfigured and confirm
+3. Confirm D1-D6 track their corresponding values using the configured level
+   colors, with the chain limited to approximately 25% brightness.
+4. Set a short watchdog lease and all channels nonzero, then stop renewing the
+   watchdog while RF stays online. Verify every PWM output goes low, all channel
+   GETs return zero, and only D2 blinks pure blue. Confirm channel SETs remain
+   ineffective until the watchdog is re-armed, and that re-arming alone does
+   not restore outputs.
+5. Set all channels nonzero, stop RF traffic for more than five seconds, and
+   verify every PWM output goes low and only D1 pulses orange-red for 200 ms per
+   second, even after the watchdog expires.
+6. Restore RF traffic without sending SETs and confirm all outputs remain off.
+   Re-arm the watchdog, send fresh channel SETs, and verify only those channels
+   resume.
+7. Repeat power-up with the PAN2110 unavailable or misconfigured and confirm
    all PWM outputs remain low while the offline heartbeat continues.
 
 After logic-level validation, verify the complete channel output stages and
